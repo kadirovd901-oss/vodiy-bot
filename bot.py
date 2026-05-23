@@ -1,108 +1,121 @@
-import logging
-import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+import requests
+import time
 
 BOT_TOKEN = "8226068762:AAG5Vr9zRmW_ZSWHcWYHUx-brar-tKXQeBc"
 KANAL_ID = -1003981225754
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 ADMIN_ID = None
 pending_ads = {}
+offset = 0
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global ADMIN_ID
-    user = update.effective_user
-    if ADMIN_ID is None:
-        ADMIN_ID = user.id
-        await update.message.reply_text(f"Admin sifatida sozlandingiz! ID: {user.id}")
-    else:
-        await update.message.reply_text(
-            "Assalomu alaykum!\n\n"
-            "Vodiyda Sotiladi kanaliga elon berish uchun:\n"
-            "- Mahsulot nomi\n"
-            "- Narxi\n"
-            "- Telefon raqam\n"
-            "- Rasm (ixtiyoriy)\n\n"
-            "Hammasini bir xabarda yuboring!"
-        )
+def send(chat_id, text, reply_markup=None):
+    data = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        import json
+        data["reply_markup"] = json.dumps(reply_markup)
+    requests.post(f"{API}/sendMessage", data=data)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global ADMIN_ID
-    user = update.effective_user
-    message = update.message
+def send_photo(chat_id, photo, caption, reply_markup=None):
+    data = {"chat_id": chat_id, "photo": photo, "caption": caption}
+    if reply_markup:
+        import json
+        data["reply_markup"] = json.dumps(reply_markup)
+    requests.post(f"{API}/sendPhoto", data=data)
 
-    if ADMIN_ID and user.id == ADMIN_ID:
+def answer_callback(callback_id):
+    requests.post(f"{API}/answerCallbackQuery", data={"callback_query_id": callback_id})
+
+def edit_message(chat_id, message_id, text):
+    requests.post(f"{API}/editMessageText", data={"chat_id": chat_id, "message_id": message_id, "text": text})
+
+def get_updates():
+    global offset
+    try:
+        r = requests.get(f"{API}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35)
+        return r.json().get("result", [])
+    except:
+        return []
+
+def handle_update(update):
+    global ADMIN_ID, pending_ads
+
+    if "callback_query" in update:
+        cb = update["callback_query"]
+        answer_callback(cb["id"])
+        data = cb["data"]
+        chat_id = cb["message"]["chat"]["id"]
+        message_id = cb["message"]["message_id"]
+
+        if data.startswith("approve_"):
+            key = data[8:]
+            if key in pending_ads:
+                ad = pending_ads[key]
+                text = f"YANGI ELON\n\n{ad['text']}\n\nMuallif: {ad['user_name']}\n@vodiyda_sotiladi"
+                if ad.get("photo"):
+                    send_photo(KANAL_ID, ad["photo"], text)
+                else:
+                    send(KANAL_ID, text)
+                send(ad["user_id"], "Eloningiz kanalga joylashtirildi! @vodiyda_sotiladi")
+                edit_message(chat_id, message_id, "Elon kanalga chiqarildi!")
+                del pending_ads[key]
+
+        elif data.startswith("reject_"):
+            key = data[7:]
+            if key in pending_ads:
+                ad = pending_ads[key]
+                send(ad["user_id"], "Eloningiz qabul qilinmadi. Qayta urinib koring.")
+                edit_message(chat_id, message_id, "Elon rad etildi.")
+                del pending_ads[key]
         return
 
-    text = message.text or message.caption or "(Matn yoq)"
-    key = f"{message.message_id}_{user.id}"
+    if "message" not in update:
+        return
 
-    pending_ads[key] = {
-        "user_id": user.id,
-        "text": text,
-        "photo": message.photo[-1].file_id if message.photo else None,
-        "user_name": user.first_name or "Foydalanuvchi"
-    }
+    msg = update["message"]
+    user_id = msg["from"]["id"]
+    user_name = msg["from"].get("first_name", "Foydalanuvchi")
+    text = msg.get("text", "") or msg.get("caption", "") or "(Matn yoq)"
+
+    if text == "/start":
+        if ADMIN_ID is None:
+            ADMIN_ID = user_id
+            send(user_id, f"Admin sifatida sozlandingiz! ID: {user_id}")
+        else:
+            send(user_id, "Assalomu alaykum!\n\nVodiyda Sotiladi kanaliga elon berish uchun mahsulot nomi, narxi va telefon raqamingizni yuboring.")
+        return
+
+    if ADMIN_ID and user_id == ADMIN_ID:
+        return
+
+    msg_id = msg["message_id"]
+    key = f"{msg_id}_{user_id}"
+    photo = None
+    if "photo" in msg:
+        photo = msg["photo"][-1]["file_id"]
+
+    pending_ads[key] = {"user_id": user_id, "text": text, "photo": photo, "user_name": user_name}
 
     if ADMIN_ID:
-        caption = f"Yangi elon sorovi\n\nFoydalanuvchi: {user.first_name} (ID: {user.id})\nMatn: {text}"
-        keyboard = [[
-            InlineKeyboardButton("Tasdiqlash", callback_data=f"approve_{key}"),
-            InlineKeyboardButton("Rad etish", callback_data=f"reject_{key}")
-        ]]
-        markup = InlineKeyboardMarkup(keyboard)
-
-        if message.photo:
-            await context.bot.send_photo(chat_id=ADMIN_ID, photo=message.photo[-1].file_id, caption=caption, reply_markup=markup)
+        caption = f"Yangi elon sorovi\n\nFoydalanuvchi: {user_name} (ID: {user_id})\nMatn: {text}"
+        keyboard = {"inline_keyboard": [[
+            {"text": "Tasdiqlash", "callback_data": f"approve_{key}"},
+            {"text": "Rad etish", "callback_data": f"reject_{key}"}
+        ]]}
+        if photo:
+            send_photo(ADMIN_ID, photo, caption, keyboard)
         else:
-            await context.bot.send_message(chat_id=ADMIN_ID, text=caption, reply_markup=markup)
+            send(ADMIN_ID, caption, keyboard)
 
-    await message.reply_text("Eloningiz qabul qilindi! Tez orada korib chiqiladi.")
+    send(user_id, "Eloningiz qabul qilindi! Tez orada korib chiqiladi.")
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data.startswith("approve_"):
-        key = data[8:]
-        action = "approve"
-    elif data.startswith("reject_"):
-        key = data[7:]
-        action = "reject"
-    else:
-        return
-
-    if key not in pending_ads:
-        await query.edit_message_text("Bu elon topilmadi.")
-        return
-
-    ad = pending_ads[key]
-
-    if action == "approve":
-        kanal_text = f"YANGI ELON\n\n{ad['text']}\n\nMuallif: {ad['user_name']}\n@vodiyda_sotiladi"
-        if ad["photo"]:
-            await context.bot.send_photo(chat_id=KANAL_ID, photo=ad["photo"], caption=kanal_text)
-        else:
-            await context.bot.send_message(chat_id=KANAL_ID, text=kanal_text)
-        await context.bot.send_message(chat_id=ad["user_id"], text="Eloningiz kanalga joylashtirildi! @vodiyda_sotiladi")
-        await query.edit_message_text("Elon kanalga chiqarildi!")
-    else:
-        await context.bot.send_message(chat_id=ad["user_id"], text="Eloningiz qabul qilinmadi. Qayta urinib koring.")
-        await query.edit_message_text("Elon rad etildi.")
-
-    del pending_ads[key]
-
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-    logger.info("Bot ishga tushdi!")
-    app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+print("Bot ishga tushdi!")
+while True:
+    try:
+        updates = get_updates()
+        for update in updates:
+            offset = update["update_id"] + 1
+            handle_update(update)
+    except Exception as e:
+        print(f"Xato: {e}")
+        time.sleep(5)
